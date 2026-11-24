@@ -153,6 +153,7 @@ tests/
   test_agent.py       agent loop（注入假 client，不需要 API key）
   test_config.py      .env 解析与客户端构造
   test_live.py        真实 API 集成测试（需要凭据，默认跳过）
+.fool/skills/fibonacci-bignum/  技能包：大整数斐波那契（原 Java 实现的唯一存活形态，见文末）
 ```
 
 实现严格对照 [`agent-design-plan.md`](./agent-design-plan.md) 的代码骨架：
@@ -224,8 +225,26 @@ python -m unittest tests.test_live -v
 
 ---
 
-仓库里原有的 Java fibonacci 实现保持不变，与本 Agent 相互独立：
+## 技能包：`.fool/skills/fibonacci-bignum/`
+
+仓库里原有的 Java fibonacci 实现（`src/main/java/com/zte/lgf`：`Num` 大数加法 +
+`Main` 斐波那契递推）已改造为技能包，唯一存活形态是 Python 实现：
 
 ```
-src/main/java/com/zte/lgf/     # 大数 fibonacci 求和
+.fool/skills/fibonacci-bignum/
+  SKILL.md                  # 技能说明：何时用、参数、输出格式
+  scripts/
+    fibonacci.py            # 实现（单文件，只用标准库）
+  references/
+    bignum-add.md           # 算法原理、原代码到新代码的映射、行为差异、性能实测
 ```
+
+```bash
+python .fool/skills/fibonacci-bignum/scripts/fibonacci.py 20           # 输出 F(1)..F(20)，格式与原 Java 版逐字节一致
+python .fool/skills/fibonacci-bignum/scripts/fibonacci.py 1000 --sum   # 前 1000 项之和
+python .fool/skills/fibonacci-bignum/scripts/fibonacci.py --selftest   # 自检 + 双引擎交叉验证
+```
+
+有两种计算引擎：`native` 用 Python 内置任意精度 `int`（默认），
+`manual` 用移植过来的字符串大数加法（原 Java `Num.add` 的算法），两者输出永远一致。
+详见 [`.fool/skills/fibonacci-bignum/SKILL.md`](./.fool/skills/fibonacci-bignum/SKILL.md)。
