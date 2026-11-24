@@ -1,2 +1,231 @@
-# fibonacci
-实现了大数的fibonacci求和
+# FoolAgent
+
+基于 Pi 哲学的最小 Agent Loop：**四个原子工具 + 一个 while 循环，不做任何框架抽象**。
+
+> 设计原则照搬 Pi：工具永远只有 4 个，能力扩展靠 `bash` 调 CLI，而不是不断加工具。
+
+## 快速开始
+
+模型配置从 `.env` 读取（也可直接用环境变量覆盖）：
+
+```bash
+# .env（已被 .gitignore 忽略，模板见 .env.example）
+INVEST_ANTHROPIC_BASE_URL=https://api.minimax.cn/anthropic
+INVEST_ANTHROPIC_AUTH_TOKEN=sk-xxx
+INVEST_ANTHROPIC_MODEL=MiniMax-M3.1-Flash
+```
+
+```bash
+python src/mini_agent.py              # 交互模式：一直问，一直答，上下文自动保留
+python src/mini_agent.py "你的任务"    # 单次任务：跑完就退出
+```
+
+交互模式下：
+
+```
+你 > 这个项目是干什么的
+助手 > ...
+你 > 那 run.py 里的 chat 命令做什么
+助手 > ...          # 模型看得到上一轮对话
+你 > /clear         # 清空上下文，从零开始
+你 > /exit          # 退出（Ctrl-D 同）
+```
+
+启动时会打印实际生效的配置：
+
+```
+工作目录：D:\project\github\FoolAgent
+模式：交互对话
+模型：MiniMax-M3.1-Flash @ https://api.minimax.cn/anthropic（标准库兼容客户端）
+```
+
+### 虚拟环境（推荐）
+
+项目只依赖标准库就能跑；只有想用官方 `anthropic` SDK 时才需要装包。装了包就放进虚拟环境：
+
+```bash
+python -m venv .venv
+# cmd
+.venv\Scripts\activate.bat
+# PowerShell
+.venv\Scripts\Activate.ps1
+# Git Bash
+source .venv/Scripts/activate
+
+pip install -r requirements.txt
+```
+
+`run.cmd` / `run.sh` 会自动优先使用 `.venv` 里的解释器；直接 `python src/mini_agent.py`
+时则取决于当前终端激活的是哪个环境。
+
+### 配置读取顺序
+
+`.env` 的查找顺序是 `ANTHROPIC_ENV_FILE` > 当前目录 > 仓库根目录；
+**环境变量优先级高于 `.env`**，所以 CI 里直接 `export INVEST_ANTHROPIC_MODEL=...` 就能覆盖。
+
+支持的键（`INVEST_` 前缀优先，其次兼容标准 Anthropic 变量名）：
+
+| 变量 | 作用 | 默认值 |
+|------|------|--------|
+| `INVEST_ANTHROPIC_BASE_URL` / `ANTHROPIC_BASE_URL` | 兼容网关地址 | 无（不设置则走官方 API） |
+| `INVEST_ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | 鉴权 token | 无 |
+| `INVEST_ANTHROPIC_MODEL` / `INVEST_ANTHROPIC_DEFAULT_SONNET_MODEL` | 模型 ID | `claude-sonnet-4-5` |
+
+### 客户端
+
+- 装了 `anthropic` SDK 就用 SDK（`pip install -r requirements.txt`）。
+- **没装也能跑**：内置 `AnthropicCompatClient` 用标准库 `urllib` 走同一个
+  Anthropic Messages API，接口完全一致。启动信息里会显示当前用的是哪种。
+
+工作目录 = 当前目录，所有文件操作和命令都被限制在该目录内。
+
+## 启动脚本
+
+一条命令验证整条链路（环境 → 测试 → 真实 API → 端到端）：
+
+```bash
+run.cmd                       # Windows：双击即可
+./run.sh                      # Linux / macOS
+python run.py                 # 跨平台
+```
+
+| 命令 | 作用 |
+|------|------|
+| `run` | 全套四步，失败会打印原因并返回非 0 退出码 |
+| `run check` | 只做环境自检（Python 版本、`.env`、凭据、依赖） |
+| `run test` | 只跑单元测试（不需要 API key） |
+| `run live` | 只验证真实 API 连通性（发一个最小请求） |
+| `run agent` | 端到端：让真实模型在临时目录里建文件并跑起来 |
+| `run agent "你的任务"` | 端到端，自定义任务（在当前目录执行） |
+| `run chat` | 交互式对话，等价于 `python src/mini_agent.py`（`/exit` 退出） |
+
+```
+── 结果汇总 ────────────────────────────────────────────────────
+  [OK] 环境自检
+  [OK] 单元测试
+  [OK] 真实 API
+  [OK] 端到端
+
+全部通过（4/4）—— 可以用了。
+```
+
+## 四个原子工具
+
+| 工具 | 作用 | 关键约束 |
+|------|------|----------|
+| `read` | 读文件，返回带行号的文本 | 大文件用 `offset`/`limit` 分页；路径不得越界 |
+| `write` | 创建或覆盖写文件 | 自动建父目录；路径不得越界 |
+| `edit` | 精确替换一段文本 | `old_text` 必须**唯一**出现，否则报错要求更长上下文 |
+| `bash` | 执行 shell 命令 | 命令白名单 + 路径不得越界 |
+
+**为什么 `edit` 要求唯一**：允许多处匹配时模型极易改错地方。强制唯一 = 强制模型先 `read` 看清再动手。报错信息会直接告诉它「请提供更长的上下文」，下一轮它会自己修正。
+
+## 沙箱
+
+`bash` 拿到 shell 权限很危险，这里做了四层限制：
+
+1. **白名单**：只允许 `python`/`git`/`ls`/`grep`/`npm`/`node` 等固定命令。
+2. **逐段校验**：按 `&&`、`||`、`;`、`|`、换行切分后**每一段**都要校验，
+   否则 `echo ok && rm -rf /` 会靠首段蒙混过关。
+3. **命令替换禁用**：`$(...)` 和反引号能藏住任意命令，一律拒绝。
+4. **路径限制**：参数里的绝对路径、`../`、`~`、`%VAR%` 一律拒绝。
+
+生产环境建议再套一层 Docker：
+
+```bash
+docker run --rm -it \
+  -v $(pwd):/workspace \
+  --network=none \
+  --memory=2g \
+  --cpus=2 \
+  python:3.11-slim \
+  python /workspace/src/mini_agent.py "你的任务"
+```
+
+`--network=none` 断网，防止它偷偷访问外网。
+
+## 代码结构
+
+```
+src/mini_agent.py       全部实现：四个原子工具 + 沙箱 + Agent Loop（单文件）
+tests/
+  test_tools.py       工具行为与沙箱边界
+  test_agent.py       agent loop（注入假 client，不需要 API key）
+  test_config.py      .env 解析与客户端构造
+  test_live.py        真实 API 集成测试（需要凭据，默认跳过）
+```
+
+实现严格对照 [`agent-design-plan.md`](./agent-design-plan.md) 的代码骨架：
+函数名（`tool_read`/`tool_write`/`tool_edit`/`tool_bash`/`run_agent`）、
+常量（`TOOLS`/`TOOL_IMPL`/`SYSTEM_PROMPT`/`MAX_LOOP`/`WORKSPACE`）、
+schema 和系统提示词全部保持原样。
+
+### 与设计文档的差异
+
+只有三处**必要的**改动，其余逐行对应：
+
+| 改动 | 原因 |
+|------|------|
+| `run_agent(user_input, client=None, verbose=True)` | 多一个 `client` 参数，便于注入假 client 做测试（否则测试必须联网） |
+| `from anthropic import Anthropic` 改成 try/except | 没装 SDK 时仍可 import 本模块跑测试，改用内置标准库客户端 |
+| `MODEL`/`BASE_URL`/`AUTH_TOKEN` 从 `.env` 读取 | 原本硬编码 `claude-sonnet-4-5` + 读 `ANTHROPIC_API_KEY`，无法指向兼容网关 |
+
+另有 4 处是**修 bug**（文档的约束表写了要求，但示例代码没实现或实现错了）：
+
+1. **超时杀不干净**：文档版 `subprocess.run(timeout=)` 只杀 `cmd.exe`，
+   子进程 `python` 仍持有管道，函数会一直阻塞到子进程结束——实测超时 1 秒却卡了 30 秒。
+   改为按进程组终止整棵进程树（Windows 用 `taskkill /T`）。
+2. **白名单只看整条命令的第一段**：`echo ok && rm -rf /` 靠首段蒙混过关。
+   改为按 `&&`/`||`/`;`/`|`/换行切分后逐段校验。
+3. **路径越界判断有误**：文档用 `str(p).startswith(str(WORKSPACE))`，
+   会把 `C:\workspace2` 误判成 `C:\workspace` 的子目录。
+4. **约束表承诺的 bash 路径限制没实现**：文档代码里 `cat /etc/passwd` 是放行的。
+   已补上：绝对路径、`../`、`~`、`%VAR%` 一律拒绝；命令替换 `$(...)`、反引号、
+   `python -c` 内联执行同样拒绝。
+
+## 设计取舍
+
+- **不做上下文压缩**：超过阈值直接报错让人手动处理。自动摘要会丢信息，
+  而丢的往往正是最需要的（比如某个函数签名）。
+- **系统提示词保持极简**：Pi 的全部提示词不到 1000 tokens。实测提示词越长，
+  模型越容易忽略关键约束，所以只保留 5 条核心工作原则。
+- **不做框架抽象**：只依赖 `anthropic` SDK + 标准库，不引 LangChain，不做 MCP。
+  连 `.env` 解析都是标准库手写的 15 行，不引 `python-dotenv`。
+  需要外部能力就写 CLI，Agent 通过 `bash` 调用：
+
+  ```bash
+  quant-tools fetch-financials --code 600519 --year 2025
+  quant-tools calc-position --capital 100000 --risk 0.02
+  ```
+
+  工具数量永远是 4 个，能力无限扩展。
+
+## 测试
+
+不需要 API key，模型调用被注入成可替换对象：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+真实 API 集成测试需要凭据（读 `.env` 里的 `INVEST_ANTHROPIC_AUTH_TOKEN` /
+`INVEST_ANTHROPIC_BASE_URL` / `INVEST_ANTHROPIC_MODEL`），没配置就自动跳过：
+
+```bash
+python -m unittest tests.test_live -v
+```
+
+## 已知限制
+
+- `bash` 白名单是**第一道防线**，不是强隔离。`python script.py` 能执行任意逻辑
+  （脚本是 Agent 自己写的），`git`、`npm` 同样如此。
+  真正的隔离要靠 Docker 或系统级沙箱。
+- 单次 bash 输出上限 20000 字符，超出截断；上下文超过 600000 字符直接报错。
+
+---
+
+仓库里原有的 Java fibonacci 实现保持不变，与本 Agent 相互独立：
+
+```
+src/main/java/com/zte/lgf/     # 大数 fibonacci 求和
+```
