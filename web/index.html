@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FoolAgent · 对话</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">F</span>
+        <div class="brand-text">
+          <h1>FoolAgent</h1>
+          <p id="model-line" class="subtitle">正在读取配置…</p>
+        </div>
+      </div>
+      <div class="actions">
+        <span id="status" class="status idle" role="status">空闲</span>
+        <button id="reset" class="ghost" type="button" title="清空服务端对话上下文">清空对话</button>
+      </div>
+    </header>
+
+    <main id="messages" class="messages" aria-live="polite">
+      <section class="empty" id="empty">
+        <div class="empty-icon" aria-hidden="true">✦</div>
+        <h2>今天想做点什么？</h2>
+        <p>输入问题，每一步思考、工具调用与结果都会实时显示在这里。</p>
+        <div class="suggestions">
+          <button class="suggestion" type="button">这个项目是干什么的？</button>
+          <button class="suggestion" type="button">用 read 看看 README 的开头</button>
+          <button class="suggestion" type="button">写个脚本计算 fibonacci(100) 并运行验证</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="composer">
+      <div class="composer-inner">
+        <textarea id="input" rows="1" placeholder="给 FoolAgent 发消息…（Enter 发送，Shift+Enter 换行）" autocomplete="off" spellcheck="false"></textarea>
+        <button id="send" class="send" type="button" title="发送">发送</button>
+      </div>
+      <div class="hint">
+        <span id="workspace"></span>
+        <span class="hint-sep">·</span>
+        <span>Enter 发送 / Shift+Enter 换行</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/markdown.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -8,6 +8,7 @@
     python run.py agent      # 端到端：让真实模型干一件真事
     python run.py agent "任务" # 端到端，自定义任务
     python run.py chat       # 交互式对话：一直问，一直答，直到 /exit 或 Ctrl-D
+    python run.py web        # 浏览器对话框：实时显示每个处理步骤
 """
 
 from __future__ import annotations
@@ -243,6 +244,23 @@ def step_chat() -> bool:
     return True
 
 
+def step_web() -> bool:
+    """浏览器对话框：阻塞式启动，Ctrl-C 退出。"""
+    title("浏览器对话框")
+    try:
+        import web_server
+    except Exception as exc:  # noqa: BLE001
+        print(fail(f"导入 web_server 失败：{exc}"))
+        return False
+
+    print(info("启动后会自动打开浏览器；直接运行可加 --port/--host/--no-browser"))
+    try:
+        return web_server.main([]) == 0
+    except RuntimeError as exc:  # noqa: BLE001
+        print(fail(f"启动失败：{exc}"))
+        return False
+
+
 # ── 入口 ──────────────────────────────────────────────────────
 
 def main(argv: List[str] | None = None) -> int:
@@ -256,7 +274,7 @@ def main(argv: List[str] | None = None) -> int:
         "command",
         nargs="?",
         default="all",
-        choices=["all", "check", "test", "live", "agent", "chat"],
+        choices=["all", "check", "test", "live", "agent", "chat", "web"],
         help="要执行的步骤，默认 all（全部）。",
     )
     parser.add_argument(
@@ -281,6 +299,8 @@ def main(argv: List[str] | None = None) -> int:
         )
     if args.command == "chat":
         steps.append(("交互式对话", step_chat))
+    if args.command == "web":
+        steps.append(("浏览器对话框", step_web))
 
     print(_c("FoolAgent 启动检查", "1;36"))
     print(_c(f"仓库根目录：{ROOT}", "90"))

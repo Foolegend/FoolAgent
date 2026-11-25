@@ -7,6 +7,7 @@
 #   ./run.sh agent      # 端到端
 #   ./run.sh agent "你的任务"
 #   ./run.sh chat       # 交互式对话
+#   ./run.sh web        # 浏览器对话框（实时显示处理步骤）
 set -euo pipefail
 
 # 有 .venv 就用它，避免装进虚拟环境的依赖找不到

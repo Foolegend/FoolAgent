@@ -79,6 +79,47 @@ pip install -r requirements.txt
 
 工作目录 = 当前目录，所有文件操作和命令都被限制在该目录内。
 
+## 浏览器对话框
+
+不想待在终端里时，可以启动一个本地网页版对话界面：
+
+```bash
+python src/web_server.py                 # 启动后自动打开 http://127.0.0.1:8765
+python src/web_server.py --port 9000 --no-browser
+./run.sh web                             # 等价入口
+```
+
+在输入框输入问题后，回答区会实时展示：
+
+- 用户消息与最终回答（支持 Markdown 标题、列表、任务列表、表格、引用、代码块、链接等）；
+- 每一轮模型的思考块和过渡性说明；
+- 每次工具调用的名称、参数、执行结果（结果默认折叠，点开可看完整输出）；
+- 出错时的红色提示；运行中可点「停止」中断本轮。
+
+实现只用标准库，没有 Web 框架、没有前端构建步骤，也没有 CDN 依赖：
+
+| 文件 | 作用 |
+|------|------|
+| `src/web_server.py` | HTTP 服务 + SSE 流式推送 |
+| `web/index.html` · `web/style.css` · `web/app.js` | 原生前端 |
+| `web/markdown.js` | 轻量 Markdown 渲染器（无第三方依赖，可被 Node 直接测试） |
+| `run_agent(..., on_event=...)` | 把 agent loop 的每一步转成结构化事件 |
+
+接口：
+
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| `GET` | `/` | 前端页面 |
+| `GET` | `/api/info` | 模型、工作目录等配置 |
+| `POST` | `/api/chat` | 入参 `{"message", "session_id"}`，返回 `text/event-stream` 事件流 |
+| `POST` | `/api/reset` | 清空某个会话的上下文 |
+
+`session_id` 由前端生成并保存在 `localStorage`，刷新页面后仍能继续多轮对话；
+点「清空对话」会同时清掉服务端历史。不同会话之间互不干扰，同一会话的并发请求会串行执行。
+
+> ⚠️ 网页版把拥有文件读写和命令执行能力的 agent 暴露成了 HTTP 接口。
+> 默认只绑定 `127.0.0.1`，不要在没有额外鉴权和容器隔离的情况下改成 `0.0.0.0`。
+
 ## 启动脚本
 
 一条命令验证整条链路（环境 → 测试 → 真实 API → 端到端）：
@@ -98,6 +139,7 @@ python run.py                 # 跨平台
 | `run agent` | 端到端：让真实模型在临时目录里建文件并跑起来 |
 | `run agent "你的任务"` | 端到端，自定义任务（在当前目录执行） |
 | `run chat` | 交互式对话，等价于 `python src/mini_agent.py`（`/exit` 退出） |
+| `run web` | 浏览器对话框，实时显示每个处理步骤（Ctrl-C 退出） |
 
 ```
 ── 结果汇总 ────────────────────────────────────────────────────
@@ -147,12 +189,20 @@ docker run --rm -it \
 ## 代码结构
 
 ```
-src/mini_agent.py       全部实现：四个原子工具 + 沙箱 + Agent Loop（单文件）
+src/mini_agent.py       Agent 核心：四个原子工具 + 沙箱 + Agent Loop（单文件）
+src/web_server.py       浏览器对话框后端：标准库 HTTP + SSE 进度流
+web/
+  index.html            对话框页面
+  style.css             样式（深色主题、移动端适配）
+  app.js                原生 JS：SSE 解析、步骤时间线、会话管理
+  markdown.js           轻量 Markdown 渲染器（标题/列表/表格/引用/任务列表等）
 tests/
-  test_tools.py       工具行为与沙箱边界
-  test_agent.py       agent loop（注入假 client，不需要 API key）
-  test_config.py      .env 解析与客户端构造
-  test_live.py        真实 API 集成测试（需要凭据，默认跳过）
+  test_tools.py         工具行为与沙箱边界
+  test_agent.py         agent loop（注入假 client，不需要 API key）
+  test_web.py           on_event 事件契约 + HTTP/SSE 接口
+  test_markdown.py      Markdown 渲染器测试（调用 node，缺 node 时跳过）
+  test_config.py        .env 解析与客户端构造
+  test_live.py          真实 API 集成测试（需要凭据，默认跳过）
 .fool/skills/fibonacci-bignum/  技能包：大整数斐波那契（原 Java 实现的唯一存活形态，见文末）
 ```
 
@@ -163,11 +213,11 @@ schema 和系统提示词全部保持原样。
 
 ### 与设计文档的差异
 
-只有三处**必要的**改动，其余逐行对应：
+只有几处**必要的**改动，其余逐行对应：
 
 | 改动 | 原因 |
 |------|------|
-| `run_agent(user_input, client=None, verbose=True)` | 多一个 `client` 参数，便于注入假 client 做测试（否则测试必须联网） |
+| `run_agent(user_input, client=None, verbose=True, history=None, on_event=None)` | 注入 `client` 便于离线测试；`history` 支持多轮；`on_event` 把每一步转成结构化事件供网页实时展示 |
 | `from anthropic import Anthropic` 改成 try/except | 没装 SDK 时仍可 import 本模块跑测试，改用内置标准库客户端 |
 | `MODEL`/`BASE_URL`/`AUTH_TOKEN` 从 `.env` 读取 | 原本硬编码 `claude-sonnet-4-5` + 读 `ANTHROPIC_API_KEY`，无法指向兼容网关 |
 

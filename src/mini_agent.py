@@ -756,26 +756,49 @@ def _clean_input(text):
     return text.encode("utf-8", "replace").decode("utf-8")
 
 
-def run_agent(user_input: str, client=None, verbose: bool = True, history=None) -> str:
+def run_agent(
+    user_input: str,
+    client=None,
+    verbose: bool = True,
+    history=None,
+    on_event=None,
+) -> str:
     """跑完整个 agent loop，返回模型最后一段文本。
 
     client 可注入，便于测试时用假 client 跑完整流程。
     history 传入一个列表时，本轮对话会追加进该列表，下一轮继续用它，
     就得到多轮对话；不传则每次都是独立的一轮。
+    on_event 传入回调时，循环会把结构化进度事件交给它（供 Web 前端实时展示）：
+        {"type": "step", "step": 1}
+        {"type": "thinking", "text": "..."}
+        {"type": "assistant_text", "text": "..."}
+        {"type": "tool_call", "id": "...", "name": "read", "input": {...}}
+        {"type": "tool_result", "id": "...", "name": "read", "output": "..."}
+        {"type": "final", "text": "..."} / {"type": "error", "message": "..."}
     """
     if client is None:
         client = _build_client()  # 真实访问：配置从 .env / 环境变量读
     messages = history if history is not None else []
     messages.append({"role": "user", "content": _clean_input(user_input)})
 
+    def emit(event):
+        """把进度推给调用方。回调异常直接向上抛：Web 端靠它感知浏览器断开。"""
+        if on_event is not None:
+            on_event(event)
+
+    def fail(text):
+        """出错时先把原因推给前端，再把终止消息补进历史。"""
+        emit({"type": "error", "message": text})
+        return _stop(messages, text)
+
     for step in range(MAX_LOOP):
         if verbose:
             print(f"\n{'─' * 50}\n[Step {step + 1}]")
+        emit({"type": "step", "step": step + 1})
 
         # 上下文不做压缩：超阈值直接报错，让人手动处理
         if _estimate_chars(messages) > MAX_CONTEXT_CHARS:
-            return _stop(
-                messages,
+            return fail(
                 f"上下文超过 {MAX_CONTEXT_CHARS} 字符上限，本项目不做自动摘要，"
                 "请手动拆分任务，或输入 /clear 清空会话。",
             )
@@ -790,7 +813,7 @@ def run_agent(user_input: str, client=None, verbose: bool = True, history=None) 
                 messages=list(messages),
             )
         except Exception as e:
-            return _stop(messages, f"调用模型失败：{e}")
+            return fail(f"调用模型失败：{e}")
 
         # 2. 把模型输出追加进历史
         content = [
@@ -798,6 +821,18 @@ def run_agent(user_input: str, client=None, verbose: bool = True, history=None) 
             for block in (getattr(response, "content", None) or [])
         ]
         messages.append({"role": "assistant", "content": content})
+
+        # 中间过程也给前端看一眼：思考块、以及调用工具前说的过渡性文字
+        for block in content:
+            block_type = _block_field(block, "type")
+            if block_type == "thinking":
+                text = _block_field(block, "thinking", "") or ""
+                if text:
+                    emit({"type": "thinking", "text": text[:4000]})
+            elif block_type == "text" and response.stop_reason != "end_turn":
+                text = _block_field(block, "text", "") or ""
+                if text:
+                    emit({"type": "assistant_text", "text": text})
 
         # 3. 如果模型不再调工具，任务结束
         if response.stop_reason == "end_turn":
@@ -807,7 +842,9 @@ def run_agent(user_input: str, client=None, verbose: bool = True, history=None) 
                 for block in content
                 if _block_field(block, "type") == "text"
             ]
-            return "\n".join(texts)
+            final_text = "\n".join(texts)
+            emit({"type": "final", "text": final_text})
+            return final_text
 
         # 4. 执行工具调用
         if response.stop_reason == "tool_use":
@@ -817,11 +854,13 @@ def run_agent(user_input: str, client=None, verbose: bool = True, history=None) 
                     continue
 
                 name = _block_field(block, "name", "")
+                block_id = _block_field(block, "id", "")
                 args = _block_field(block, "input", {}) or {}
                 if not isinstance(args, dict):
                     args = {}
                 if verbose:
                     print(f"  → {name}({json.dumps(args, ensure_ascii=False)[:120]})")
+                emit({"type": "tool_call", "id": block_id, "name": name, "input": args})
 
                 # 分发到实现
                 if name not in TOOL_IMPL:
@@ -835,21 +874,29 @@ def run_agent(user_input: str, client=None, verbose: bool = True, history=None) 
                 if verbose:
                     preview = result[:200].replace("\n", " ")
                     print(f"  ← {preview}")
+                emit({
+                    "type": "tool_result",
+                    "id": block_id,
+                    "name": name,
+                    "output": result,
+                })
 
                 tool_results.append({
                     "type": "tool_result",
-                    "tool_use_id": _block_field(block, "id", ""),
+                    "tool_use_id": block_id,
                     "content": result,
                 })
 
             if not tool_results:
-                return _stop(messages, "异常停止：模型请求了工具但没有返回 tool_use 块")
+                return fail("异常停止：模型请求了工具但没有返回 tool_use 块")
             messages.append({"role": "user", "content": tool_results})
         else:
             # max_tokens 截断等情况；assistant 内容已在上方追加，只返回不再写入
-            return f"异常停止：{response.stop_reason}"
+            text = f"异常停止：{response.stop_reason}"
+            emit({"type": "error", "message": text})
+            return text
 
-    return _stop(messages, f"达到最大循环次数 {MAX_LOOP}，强制退出")
+    return fail(f"达到最大循环次数 {MAX_LOOP}，强制退出")
 
 
 # ─────────────────────────────────────────────
