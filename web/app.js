@@ -1,4 +1,4 @@
-/* FoolAgent 前端：原生 JS，无构建、无第三方依赖。
+/* 大愚智能 前端：原生 JS，无构建、无第三方依赖。
  * 通过 POST /api/chat 读取 SSE 流，实时渲染 agent 的每个处理步骤。
  */
 (() => {
@@ -14,7 +14,7 @@
   const workspaceEl = document.getElementById("workspace");
 
   const EMPTY_TEMPLATE = messagesEl.innerHTML;
-  const SESSION_KEY = "foolagent.session";
+  const SESSION_KEY = "dayu.session";
   const MAX_STEP_LABEL = 999;
 
   const TOOL_META = {

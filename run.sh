@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# FoolAgent 启动脚本（Linux / macOS）
+# 大愚智能 启动脚本（Linux / macOS）
 #   ./run.sh            # 全套检查
 #   ./run.sh check      # 只做环境自检
 #   ./run.sh test       # 只跑单元测试

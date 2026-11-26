@@ -682,7 +682,9 @@ TOOL_IMPL = {
 # System Prompt（刻意保持极简，学 Pi）
 # ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """你是一个运行在终端里的编程助手。
+AGENT_NAME = "大愚智能"
+
+SYSTEM_PROMPT = f"""你叫「{AGENT_NAME}」，是一个运行在终端里的编程助手。
 
 你有四个工具：read、write、edit、bash。所有复杂任务都基于这四个原语完成。
 
@@ -952,7 +954,7 @@ def interactive(client=None, verbose: bool = True) -> None:
             del history[snapshot:]
             print("\n本轮已取消。")
             continue
-        print(f"\n助手 > {reply}")
+        print(f"\n{AGENT_NAME} > {reply}")
 
 
 # ─────────────────────────────────────────────

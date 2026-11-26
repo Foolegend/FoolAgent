@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""web_server.py — 给 FoolAgent 套一个浏览器对话框。
+"""web_server.py — 给 大愚智能 套一个浏览器对话框。
 
 只用标准库，不引入任何 Web 框架：
 
@@ -105,7 +105,7 @@ class ClientDisconnected(Exception):
 # ─────────────────────────────────────────────
 
 class AgentRequestHandler(BaseHTTPRequestHandler):
-    server_version = "FoolAgent/1.0"
+    server_version = "DayuAgent/1.0"
     protocol_version = "HTTP/1.1"
 
     # ── 基础工具 ──────────────────────────────
@@ -298,7 +298,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8765, client=None) -> Age
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="web_server.py",
-        description="FoolAgent 浏览器对话框（标准库 HTTP + SSE，无第三方依赖）。",
+        description="大愚智能 浏览器对话框（标准库 HTTP + SSE，无第三方依赖）。",
     )
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")
@@ -330,7 +330,7 @@ def main(argv=None) -> int:
     url = f"http://{display_host}:{actual_port}/"
 
     print()
-    print("┌─ FoolAgent Web ─────────────────────────────────────")
+    print("┌─ 大愚智能 Web ─────────────────────────────────────")
     print(f"│ 地址   {url}")
     print(f"│ 模型   {mini_agent.MODEL}" + (f" @ {mini_agent.BASE_URL}" if mini_agent.BASE_URL else ""))
     print(f"│ 工作目录 {mini_agent.WORKSPACE}")

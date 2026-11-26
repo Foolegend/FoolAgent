@@ -200,7 +200,7 @@ class WebServerTest(unittest.TestCase):
         status, content_type, body = self.get("/")
         self.assertEqual(status, 200)
         self.assertIn("text/html", content_type)
-        self.assertIn(b"FoolAgent", body)
+        self.assertIn("大愚智能".encode("utf-8"), body)
 
         status, content_type, body = self.get("/markdown.js")
         self.assertEqual(status, 200)

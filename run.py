@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FoolAgent 启动脚本：一条命令验证整条链路。
+"""大愚智能 启动脚本：一条命令验证整条链路。
 
     python run.py            # 全套：环境自检 → 单元测试 → 真实 API → 端到端
     python run.py check      # 只做环境自检
@@ -175,12 +175,12 @@ def step_agent(task: str = "") -> bool:
         return False
 
     task = task or (
-        "在当前目录创建 hello.py，内容是 print('hello-from-foolagent')，"
+        "在当前目录创建 hello.py，内容是 print('hello-from-dayu')，"
         "然后运行 python hello.py 确认输出正确，最后告诉我结果。"
     )
     print(f"  任务          {task}")
 
-    workdir = Path(tempfile.mkdtemp(prefix="foolagent_e2e_"))
+    workdir = Path(tempfile.mkdtemp(prefix="dayu_e2e_"))
     original_workspace = mini_agent.WORKSPACE
     mini_agent.WORKSPACE = workdir.resolve()
     try:
@@ -266,7 +266,7 @@ def step_web() -> bool:
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run.py",
-        description="FoolAgent 启动脚本：一条命令验证整条链路。",
+        description="大愚智能 启动脚本：一条命令验证整条链路。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -302,7 +302,7 @@ def main(argv: List[str] | None = None) -> int:
     if args.command == "web":
         steps.append(("浏览器对话框", step_web))
 
-    print(_c("FoolAgent 启动检查", "1;36"))
+    print(_c("大愚智能 启动检查", "1;36"))
     print(_c(f"仓库根目录：{ROOT}", "90"))
 
     results: List[Tuple[str, bool]] = []
