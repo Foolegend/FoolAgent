@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="愚公移山">
+  <title>愚公移山</title>
+
+  <!-- 王屋山：愚公要移走的那座 -->
+  <path d="M58 104 L94 24 L130 104 Z" fill="#33486a"/>
+  <path d="M94 24 L104 44 L84 44 Z" fill="#7f95b5"/>
+
+  <!-- 地平线 -->
+  <rect x="0" y="100" width="128" height="8" rx="4" fill="#33486a"/>
+
+  <!-- 移走的土 -->
+  <path d="M12 100 Q21 86 30 100 Z" fill="#dce6f5"/>
+
+  <!-- 木柄 -->
+  <path d="M46 62 L19 27" stroke="#c08a5a" stroke-width="5.5" stroke-linecap="round"/>
+  <!-- 镐头 -->
+  <path d="M26 21 L12 13 L9 20 L21 30 Z" fill="#dce6f5"/>
+
+  <!-- 愚公：白发白须，扛镐移山 -->
+  <path d="M44 60 Q53 54 61 60 L68 100 L38 100 Z" fill="#dce6f5"/>
+  <circle cx="52" cy="32" r="5" fill="#5eead4"/>
+  <circle cx="52" cy="45" r="8.5" fill="#dce6f5"/>
+  <!-- 白须 -->
+  <path d="M56 45 Q65 49 64 58 Q63 69 55 72 Q59 60 56 45 Z" fill="#5eead4"/>
+  <!-- 手臂 -->
+  <path d="M47 63 L39 48" stroke="#dce6f5" stroke-width="5" stroke-linecap="round"/>
+</svg>

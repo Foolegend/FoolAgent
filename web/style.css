@@ -84,6 +84,9 @@ button {
   font-weight: 800;
   font-size: 19px;
   box-shadow: 0 6px 20px rgba(94, 234, 212, 0.22);
+  /* 标识图（愚公）内缩一圈，让渐变底板透出来 */
+  object-fit: contain;
+  padding: 3px;
 }
 
 .brand-text {
@@ -195,6 +198,11 @@ button {
   color: var(--accent);
   background: linear-gradient(160deg, rgba(94, 234, 212, 0.16), rgba(129, 140, 248, 0.12));
   border: 1px solid rgba(94, 234, 212, 0.22);
+}
+
+.empty-icon img {
+  width: 44px;
+  height: 44px;
 }
 
 .empty h2 {

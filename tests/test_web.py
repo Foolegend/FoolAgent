@@ -201,6 +201,17 @@ class WebServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/html", content_type)
         self.assertIn("大愚智能".encode("utf-8"), body)
+        self.assertIn(b"/yugong.svg", body)
+
+        status, content_type, body = self.get("/yugong.svg")
+        self.assertEqual(status, 200)
+        self.assertIn("image/svg+xml", content_type)
+        self.assertIn(b"<svg", body)
+
+        status, content_type, body = self.get("/yugong-light.svg")
+        self.assertEqual(status, 200)
+        self.assertIn("image/svg+xml", content_type)
+        self.assertIn(b"<svg", body)
 
         status, content_type, body = self.get("/markdown.js")
         self.assertEqual(status, 200)

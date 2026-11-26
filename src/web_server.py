@@ -56,6 +56,8 @@ STATIC_FILES = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/markdown.js": ("markdown.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/yugong.svg": ("yugong.svg", "image/svg+xml"),
+    "/yugong-light.svg": ("yugong-light.svg", "image/svg+xml"),
 }
 
 

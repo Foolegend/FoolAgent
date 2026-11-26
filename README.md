@@ -102,6 +102,7 @@ python src/web_server.py --port 9000 --no-browser
 |------|------|
 | `src/web_server.py` | HTTP 服务 + SSE 流式推送 |
 | `web/index.html` · `web/style.css` · `web/app.js` | 原生前端 |
+| `web/yugong.svg` | 标识图：愚公移山（手绘 SVG，无二进制资源） |
 | `web/markdown.js` | 轻量 Markdown 渲染器（无第三方依赖，可被 Node 直接测试） |
 | `run_agent(..., on_event=...)` | 把 agent loop 的每一步转成结构化事件 |
 
@@ -196,6 +197,8 @@ web/
   style.css             样式（深色主题、移动端适配）
   app.js                原生 JS：SSE 解析、步骤时间线、会话管理
   markdown.js           轻量 Markdown 渲染器（标题/列表/表格/引用/任务列表等）
+  yugong.svg            标识图：愚公移山（深色版，用于渐变底板）
+  yugong-light.svg      标识图：愚公移山（浅色版，用于深色背景）
 tests/
   test_tools.py         工具行为与沙箱边界
   test_agent.py         agent loop（注入假 client，不需要 API key）
