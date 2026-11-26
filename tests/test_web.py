@@ -213,6 +213,15 @@ class WebServerTest(unittest.TestCase):
         self.assertIn("image/svg+xml", content_type)
         self.assertIn(b"<svg", body)
 
+        status, content_type, body = self.get("/favicon.png")
+        self.assertEqual(status, 200)
+        self.assertIn("image/png", content_type)
+        self.assertTrue(body.startswith(b"\x89PNG"))
+
+        status, content_type, body = self.get("/favicon.ico")
+        self.assertEqual(status, 200)
+        self.assertIn("image/x-icon", content_type)
+
         status, content_type, body = self.get("/markdown.js")
         self.assertEqual(status, 200)
         self.assertIn("javascript", content_type)

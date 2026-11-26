@@ -58,6 +58,8 @@ STATIC_FILES = {
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/yugong.svg": ("yugong.svg", "image/svg+xml"),
     "/yugong-light.svg": ("yugong-light.svg", "image/svg+xml"),
+    "/favicon.png": ("favicon.png", "image/png"),
+    "/favicon.ico": ("favicon.ico", "image/x-icon"),
 }
 
 
@@ -173,9 +175,6 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                 "has_credentials": bool(mini_agent.AUTH_TOKEN),
                 "max_loop": mini_agent.MAX_LOOP,
             })
-        elif path == "/favicon.ico":
-            self.send_response(204)
-            self.end_headers()
         else:
             self.send_json(404, {"error": "未找到"})
 
