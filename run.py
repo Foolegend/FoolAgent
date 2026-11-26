@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""大愚智能 启动脚本：一条命令验证整条链路。
+"""拙愚智能 启动脚本：一条命令验证整条链路。
 
     python run.py            # 全套：环境自检 → 单元测试 → 真实 API → 端到端
     python run.py check      # 只做环境自检
@@ -266,7 +266,7 @@ def step_web() -> bool:
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run.py",
-        description="大愚智能 启动脚本：一条命令验证整条链路。",
+        description="拙愚智能 启动脚本：一条命令验证整条链路。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -302,7 +302,7 @@ def main(argv: List[str] | None = None) -> int:
     if args.command == "web":
         steps.append(("浏览器对话框", step_web))
 
-    print(_c("大愚智能 启动检查", "1;36"))
+    print(_c("拙愚智能 启动检查", "1;36"))
     print(_c(f"仓库根目录：{ROOT}", "90"))
 
     results: List[Tuple[str, bool]] = []

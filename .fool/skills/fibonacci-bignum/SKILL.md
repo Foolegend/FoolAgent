@@ -115,7 +115,7 @@ ln -s ../../.fool/skills/fibonacci-bignum .claude/skills/fibonacci-bignum
 ## 与仓库其他部分的关系
 
 - 本仓库的 `src/mini_agent.py` 里，agent 的 `bash` 白名单**包含 `python`**，
-  所以 大愚智能 可以直接跑这个技能，无需改动白名单：
+  所以 拙愚智能 可以直接跑这个技能，无需改动白名单：
 
   ```bash
   python .fool/skills/fibonacci-bignum/scripts/fibonacci.py 20 --sum

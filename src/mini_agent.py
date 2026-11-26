@@ -682,7 +682,7 @@ TOOL_IMPL = {
 # System Prompt（刻意保持极简，学 Pi）
 # ─────────────────────────────────────────────
 
-AGENT_NAME = "大愚智能"
+AGENT_NAME = "拙愚智能"
 
 SYSTEM_PROMPT = f"""你叫「{AGENT_NAME}」，是一个运行在终端里的编程助手。
 
