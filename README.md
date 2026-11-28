@@ -24,10 +24,17 @@ python src/mini_agent.py "你的任务"    # 单次任务：跑完就退出
 
 ```
 你 > 这个项目是干什么的
-拙愚智能 > ...
+──────────────────────────────────────────────────
+[Step 1] 拙愚智能
+这是一个基于 Pi 哲学的最小 Agent Loop 项目……   # 边生成边显示
+
 你 > 那 run.py 里的 chat 命令做什么
-拙愚智能 > ...       # 模型看得到上一轮对话
+──────────────────────────────────────────────────
+[Step 1] 拙愚智能
+`run chat` 启动交互式对话……                    # 模型看得到上一轮对话
 你 > /clear         # 清空上下文，从零开始
+你 > /yes           # 本会话内自动允许写文件 / 执行命令
+你 > /ask           # 恢复逐次询问（默认）
 你 > /exit          # 退出（Ctrl-D 同）
 ```
 
@@ -38,6 +45,33 @@ python src/mini_agent.py "你的任务"    # 单次任务：跑完就退出
 模式：交互对话
 模型：MiniMax-M3.1-Flash @ https://api.minimax.cn/anthropic（标准库兼容客户端）
 ```
+
+## 流式输出
+
+模型每生成一段，终端就立刻显示一段，不用等整轮生成完：
+
+```
+[Step 1] 拙愚智能
+我先看看当前目录有什么文件。
+  → bash({"command": "ls -la"})
+  ← total 1092 drwxr-xr-x ...
+  → write({"path": "hello.py", "content": "print('hi')\n"})
+  ← 已写入 hello.py（25 字符）
+
+[Step 2] 拙愚智能
+文件写好了，运行结果是 hi。
+```
+
+实现上有两条路径，都走同一套增量事件：
+
+| 客户端 | 怎么拿流 | 说明 |
+|--------|----------|------|
+| 官方 `anthropic` SDK | `messages.create(stream=True)` | 直接拿原始 SSE 事件 |
+| 内置标准库客户端 | 自己解析 SSE | 同一套协议，不引第三方依赖 |
+
+服务端不收 `stream` 参数时（部分兼容网关会返回 400），自动退回一次性调用，
+整轮不会失败。两条路径最后都会把内容拼回**和一次性调用完全一样**的
+`content` 块（含 `tool_use` 的完整参数），所以对话历史不受影响。
 
 ### 虚拟环境（推荐）
 
@@ -76,8 +110,60 @@ pip install -r requirements.txt
 - 装了 `anthropic` SDK 就用 SDK（`pip install -r requirements.txt`）。
 - **没装也能跑**：内置 `AnthropicCompatClient` 用标准库 `urllib` 走同一个
   Anthropic Messages API，接口完全一致。启动信息里会显示当前用的是哪种。
+- 两种客户端都支持流式（见下节），流式行为一致。
 
 工作目录 = 当前目录，所有文件操作和命令都被限制在该目录内。
+
+## 技能：`.fool/skills/`
+
+技能包就是一个目录，里面有 `SKILL.md`（说明）和可选的 `scripts/`、`references/`：
+
+```
+.fool/skills/<名字>/
+  SKILL.md            # 头部 frontmatter 写 name / description
+  scripts/...         # 可以直接跑的脚本
+  references/...      # 参考资料
+```
+
+启动时（准确说是每次调模型时）扫一遍工作区里的 `.fool/skills/`，
+把技能索引拼进 system prompt：
+
+```
+可用技能（从工作区的技能包里发现的）：
+- fibonacci-bignum：计算大整数斐波那契数列与前 N 项之和……
+  说明文件：.fool/skills/fibonacci-bignum/SKILL.md
+  可以直接跑的脚本：.fool/skills/fibonacci-bignum/scripts/fibonacci.py
+  参考资料：.fool/skills/fibonacci-bignum/references/bignum-add.md
+需要某个技能时，先 read 它的说明文件，再按说明用 bash 调它的脚本；不要自己另写一份。
+```
+
+**工具数量没有变**，还是 read / write / edit / bash 四个——模型要跑技能脚本，
+照旧用 `bash` 调。这正是文档里说的「能力扩展靠 bash 调 CLI，而不是不断加工具」。
+
+放了新技能包不用重启，下次提问就能用上。
+
+## 操作确认
+
+`write` / `edit` / `bash` 有副作用，执行前会先问用户。`read` 是只读的，不问。
+
+终端里：
+
+```
+※ 需要确认：执行命令：python .fool/skills/fibonacci-bignum/scripts/fibonacci.py 50
+  允许执行吗？[y/N]
+```
+
+- 交互式终端：逐次询问，回 `y` 允许，其它一律拒绝；
+  拒绝后不会执行，模型会收到「用户拒绝执行」，让它换个做法而不是重试。
+- `/yes` 切换成本会话自动允许，`/ask` 切回来。
+- 非交互终端（管道、脚本）没法问人，自动放行并打印一次说明。
+
+网页版会弹一张确认卡片，点「允许 / 拒绝」：
+
+```
+python src/web_server.py                    # 默认每次都问
+python src/web_server.py --no-confirm       # 不问，直接执行
+```
 
 ## 浏览器对话框
 
@@ -92,8 +178,10 @@ python src/web_server.py --port 9000 --no-browser
 在输入框输入问题后，回答区会实时展示：
 
 - 用户消息与最终回答（支持 Markdown 标题、列表、任务列表、表格、引用、代码块、链接等）；
+- 模型**正在生成的文字**，逐段出现在回答区（不是等整轮生成完才显示）；
 - 每一轮模型的思考块和过渡性说明；
 - 每次工具调用的名称、参数、执行结果（结果默认折叠，点开可看完整输出）；
+- 写文件 / 执行命令前的**确认卡片**，点「允许 / 拒绝」；
 - 出错时的红色提示；运行中可点「停止」中断本轮。
 
 实现只用标准库，没有 Web 框架、没有前端构建步骤，也没有 CDN 依赖：
@@ -106,6 +194,20 @@ python src/web_server.py --port 9000 --no-browser
 | `web/markdown.js` | 轻量 Markdown 渲染器（无第三方依赖，可被 Node 直接测试） |
 | `run_agent(..., on_event=...)` | 把 agent loop 的每一步转成结构化事件 |
 
+事件契约：
+
+| 事件 | 何时发 | 载荷 |
+|------|--------|------|
+| `step` | 每轮开始 | `step` |
+| `text_delta` | 流式模式下，模型每吐出一段文字 | `text` |
+| `thinking_delta` | 流式模式下，模型每吐出一段思考 | `text` |
+| `thinking` | 非流式客户端，整块思考 | `text` |
+| `assistant_text` | 非流式客户端，调用工具前的过渡性文字 | `text` |
+| `tool_call` / `tool_result` | 工具调用与结果 | `id` `name` `input` / `output` |
+| `confirm` / `confirm_result` | 要用户点头才能执行 | `id` `name` `input` / `approved` |
+| `tool_denied` | 用户拒绝了这次操作 | `id` `name` |
+| `final` / `error` / `done` | 本轮结束 | `text` / `message` |
+
 接口：
 
 | 方法 | 路径 | 作用 |
@@ -113,6 +215,7 @@ python src/web_server.py --port 9000 --no-browser
 | `GET` | `/` | 前端页面 |
 | `GET` | `/api/info` | 模型、工作目录等配置 |
 | `POST` | `/api/chat` | 入参 `{"message", "session_id"}`，返回 `text/event-stream` 事件流 |
+| `POST` | `/api/confirm` | 入参 `{"request_id", "approved"}`，回答一次确认询问 |
 | `POST` | `/api/reset` | 清空某个会话的上下文 |
 
 `session_id` 由前端生成并保存在 `localStorage`，刷新页面后仍能继续多轮对话；
@@ -165,13 +268,17 @@ python run.py                 # 跨平台
 
 ## 沙箱
 
-`bash` 拿到 shell 权限很危险，这里做了四层限制：
+`bash` 拿到 shell 权限很危险，这里做了五层限制：
 
 1. **白名单**：只允许 `python`/`git`/`ls`/`grep`/`npm`/`node` 等固定命令。
 2. **逐段校验**：按 `&&`、`||`、`;`、`|`、换行切分后**每一段**都要校验，
    否则 `echo ok && rm -rf /` 会靠首段蒙混过关。
 3. **命令替换禁用**：`$(...)` 和反引号能藏住任意命令，一律拒绝。
-4. **路径限制**：参数里的绝对路径、`../`、`~`、`%VAR%` 一律拒绝。
+4. **路径限制**：参数里的绝对路径、`../`、`~`、`%VAR%` 一律拒绝；
+   **选项值里的路径也查**，`--output=/tmp/x`、`--git-dir=/tmp/y` 这种
+   藏在等号后面的同样拒绝。
+5. **危险参数禁用**：`find -exec`、`git -c`、`git config --global` 这类
+   能绕开白名单执行别的程序的一律拒绝。
 
 生产环境建议再套一层 Docker：
 
@@ -190,22 +297,28 @@ docker run --rm -it \
 ## 代码结构
 
 ```
-src/mini_agent.py       Agent 核心：四个原子工具 + 沙箱 + Agent Loop（单文件）
-src/web_server.py       浏览器对话框后端：标准库 HTTP + SSE 进度流
+src/mini_agent.py       Agent 核心：四个原子工具 + 沙箱 + Agent Loop + 流式输出 + 操作确认
+src/skills.py           技能发现：扫描 .fool/skills/，生成给模型看的索引
+src/web_server.py       浏览器对话框后端：标准库 HTTP + SSE 进度流 + 确认往返
 web/
   index.html            对话框页面
   style.css             样式（深色主题、移动端适配）
-  app.js                原生 JS：SSE 解析、步骤时间线、会话管理
+  app.js                原生 JS：SSE 解析、步骤时间线、流式渲染、确认卡片、会话管理
   markdown.js           轻量 Markdown 渲染器（标题/列表/表格/引用/任务列表等）
   yugong.svg            标识图：愚公移山（深色版，用于渐变底板）
   yugong-light.svg      标识图：愚公移山（浅色版，用于深色背景）
 tests/
   test_tools.py         工具行为与沙箱边界
   test_agent.py         agent loop（注入假 client，不需要 API key）
+  test_stream.py        流式输出：SSE 解析、增量拼装、事件契约
+  test_skills.py        技能发现：frontmatter 解析、索引、拼进 system prompt
+  test_confirm.py       操作确认：核心逻辑、终端提示、网页确认往返
   test_web.py           on_event 事件契约 + HTTP/SSE 接口
+  test_webapp.py        前端渲染（node + 最小 DOM，缺 node 时跳过）
   test_markdown.py      Markdown 渲染器测试（调用 node，缺 node 时跳过）
   test_config.py        .env 解析与客户端构造
   test_live.py          真实 API 集成测试（需要凭据，默认跳过）
+  webapp_harness.js     给 web/app.js 套的最小 DOM（配合 test_webapp.py）
 .fool/skills/fibonacci-bignum/  技能包：大整数斐波那契（原 Java 实现的唯一存活形态，见文末）
 ```
 
@@ -220,9 +333,13 @@ schema 和系统提示词全部保持原样。
 
 | 改动 | 原因 |
 |------|------|
-| `run_agent(user_input, client=None, verbose=True, history=None, on_event=None)` | 注入 `client` 便于离线测试；`history` 支持多轮；`on_event` 把每一步转成结构化事件供网页实时展示 |
+| `run_agent(user_input, client=None, verbose=True, history=None, on_event=None, on_text=None, on_confirm=None)` | 注入 `client` 便于离线测试；`history` 支持多轮；`on_event` 把每一步转成结构化事件供网页实时展示；`on_text` 让终端边生成边显示；`on_confirm` 让副作用操作先问过用户 |
 | `from anthropic import Anthropic` 改成 try/except | 没装 SDK 时仍可 import 本模块跑测试，改用内置标准库客户端 |
 | `MODEL`/`BASE_URL`/`AUTH_TOKEN` 从 `.env` 读取 | 原本硬编码 `claude-sonnet-4-5` + 读 `ANTHROPIC_API_KEY`，无法指向兼容网关 |
+| 模型调用改成流式（`create(stream=True)`） | 文档 P0 提到「流式输出」，原示例代码是一次性返回，用户要干等整轮生成完 |
+| 内置标准库客户端自己解析 SSE | 官方 SDK 没装时也要能流式，不能只有装 SDK 才有流式 |
+| 新增 `src/skills.py`：扫描 `.fool/skills/` 生成技能索引 | 文档说「能力扩展靠 bash 调 CLI」，但没说 CLI 从哪来——索引让模型知道有哪些现成技能可用，工具数量不变 |
+| 新增 `on_confirm` 钩子 | 文档 P1 的「工具调用确认」；写文件 / 执行命令之前先问，拒绝就不执行 |
 
 另有 4 处是**修 bug**（文档的约束表写了要求，但示例代码没实现或实现错了）：
 
@@ -275,6 +392,8 @@ python -m unittest tests.test_live -v
   （脚本是 Agent 自己写的），`git`、`npm` 同样如此。
   真正的隔离要靠 Docker 或系统级沙箱。
 - 单次 bash 输出上限 20000 字符，超出截断；上下文超过 600000 字符直接报错。
+- 部分兼容网关不支持 `stream` 参数（返回 400），这时会自动退回一次性调用：
+  功能不受影响，但终端上要等整轮生成完才一次性显示。
 
 ---
 

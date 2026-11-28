@@ -202,6 +202,11 @@
       stepCount: 0,
       currentStep: null,
       tools: new Map(),
+      confirms: new Map(),
+      liveText: "",
+      liveThinking: "",
+      thinkingParts: null,
+      renderTimer: null,
 
       addStep(number) {
         trace.hidden = false;
@@ -244,6 +249,67 @@
         details.append(summary, body);
         wrap.appendChild(details);
         step.items.appendChild(wrap);
+      },
+
+      // ── 流式增量 ────────────────────────────────────────
+      appendDelta(kind, text) {
+        const chunk = String(text ?? "");
+        if (!chunk) return;
+        if (kind === "thinking") {
+          this.liveThinking += chunk;
+          this.renderThinking();
+          return;
+        }
+        this.liveText += chunk;
+        this.scheduleAnswer();
+      },
+
+      /** 增量来得很快，攒 50ms 再重绘一次 Markdown。 */
+      scheduleAnswer() {
+        if (this.renderTimer) return;
+        this.renderTimer = setTimeout(() => {
+          this.renderTimer = null;
+          this.renderAnswer();
+        }, 50);
+      },
+
+      renderAnswer() {
+        if (!this.liveText) return;
+        answer.innerHTML = renderMarkdown(this.liveText);
+        scrollToBottom();
+      },
+
+      renderThinking() {
+        const step = this.ensureStep();
+        if (!this.thinkingParts) {
+          const wrap = el("div", "item think");
+          const details = el("details");
+          const summary = el("summary");
+          const body = el("div", "item-body");
+          details.append(summary, body);
+          wrap.appendChild(details);
+          step.items.appendChild(wrap);
+          this.thinkingParts = { summary, body };
+        }
+        this.thinkingParts.summary.textContent = `模型思考（${this.liveThinking.length} 字符）`;
+        this.thinkingParts.body.textContent = this.liveThinking;
+      },
+
+      /**
+       * 这一步的文字是中间过程（后面还要调工具），从回答区挪进步骤明细。
+       * 只有真正结束的最终回答才留在回答区。
+       */
+      flushLive() {
+        if (this.liveThinking) {
+          this.liveThinking = "";
+          this.thinkingParts = null;
+        }
+        if (this.liveText) {
+          const text = this.liveText;
+          this.liveText = "";
+          this.addNote(text);
+          answer.innerHTML = "";
+        }
       },
 
       addNote(text) {
@@ -312,14 +378,80 @@
         step.items.appendChild(box);
       },
 
+      // ── 操作确认 ──────────────────────────────────────────
+      addConfirm(id, name, args) {
+        const step = this.ensureStep();
+        const box = el("div", "confirm");
+
+        const head = el("div", "confirm-head");
+        const icon = el("span", "tool-icon");
+        icon.textContent = "⚠️";
+        const label = el("span", "tool-label");
+        label.textContent = "需要你确认";
+        const badge = el("span", "tool-name");
+        badge.textContent = name || "tool";
+        head.append(icon, label, badge);
+
+        const desc = el("pre", "confirm-desc");
+        desc.textContent = formatArgs(name, args);
+
+        const actions = el("div", "confirm-actions");
+        const allow = el("button", "confirm-allow");
+        allow.textContent = "允许";
+        allow.type = "button";
+        const deny = el("button", "confirm-deny");
+        deny.textContent = "拒绝";
+        deny.type = "button";
+        actions.append(allow, deny);
+
+        const status = el("div", "confirm-status");
+        status.textContent = "等待你的选择…";
+
+        box.append(head, desc, actions, status);
+        step.items.appendChild(box);
+
+        const send = (approved) => {
+          allow.disabled = true;
+          deny.disabled = true;
+          status.textContent = approved ? "已允许，正在执行…" : "已拒绝";
+          fetch("/api/confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ request_id: id, approved }),
+          }).catch((err) => {
+            status.textContent = `提交失败：${err && err.message ? err.message : err}`;
+          });
+        };
+        allow.addEventListener("click", () => send(true));
+        deny.addEventListener("click", () => send(false));
+
+        this.confirms.set(id, { box, allow, deny, status });
+      },
+
+      finishConfirm(id, approved, reason) {
+        const entry = this.confirms.get(id);
+        if (!entry) return;
+        entry.allow.disabled = true;
+        entry.deny.disabled = true;
+        entry.status.textContent = approved
+          ? "已允许"
+          : reason || "已拒绝";
+        entry.box.classList.toggle("denied", !approved);
+      },
+
       setAnswer(text) {
         this.hasAnswer = true;
+        this.liveText = "";
         answer.innerHTML = renderMarkdown(text);
       },
 
       finish(kind) {
         if (this.finished) return;
         this.finished = true;
+        if (this.renderTimer) {
+          clearTimeout(this.renderTimer);
+          this.renderTimer = null;
+        }
         working.remove();
         root.classList.toggle("stopped", kind === "stopped");
         if (this.currentStep) {
@@ -377,7 +509,15 @@
         saveSession(ev.session_id);
         break;
       case "step":
+        // 上一步的文字如果还没定性（后面还要调工具），先挪进步骤明细
+        turn.flushLive();
         turn.addStep(ev.step);
+        break;
+      case "text_delta":
+        turn.appendDelta("text", ev.text || "");
+        break;
+      case "thinking_delta":
+        turn.appendDelta("thinking", ev.text || "");
         break;
       case "thinking":
         turn.addThinking(ev.text || "");
@@ -386,10 +526,17 @@
         turn.addNote(ev.text || "");
         break;
       case "tool_call":
+        turn.flushLive();
         turn.addTool(ev.id, ev.name, ev.input);
         break;
       case "tool_result":
         turn.finishTool(ev.id, ev.name, ev.output);
+        break;
+      case "confirm":
+        turn.addConfirm(ev.id, ev.name, ev.input);
+        break;
+      case "confirm_result":
+        turn.finishConfirm(ev.id, ev.approved, ev.reason);
         break;
       case "error":
         turn.addError(ev.message);

@@ -60,6 +60,15 @@ def title(text: str) -> None:
     print(_c(f"── {text} " + "─" * max(0, 56 - len(text)), "1;36"))
 
 
+def _one_line(text: str) -> str:
+    """把多行回复压成一行，用来在摘要里显示（完整内容已经流式打印过了）。"""
+    stripped = (text or "").strip()
+    if not stripped:
+        return "(空)"
+    first = stripped.splitlines()[0].strip()
+    return first if len(first) <= 60 else first[:60] + "…"
+
+
 def mask(value: str, keep: int = 6) -> str:
     """掩码敏感值，只留头尾。"""
     if not value:
@@ -184,9 +193,11 @@ def step_agent(task: str = "") -> bool:
     original_workspace = mini_agent.WORKSPACE
     mini_agent.WORKSPACE = workdir.resolve()
     try:
-        result = mini_agent.run_agent(task, verbose=True)
+        result = mini_agent.run_agent(
+            task, verbose=True, on_text=mini_agent._write_chunk
+        )
         print()
-        print(f"  最终回复      {result}")
+        print(f"  最终回复      {_one_line(result)}（共 {len(result)} 字符）")
 
         script = workdir / "hello.py"
         if script.exists():
@@ -217,9 +228,9 @@ def step_agent_cli(prompt: str) -> bool:
     print(f"  任务          {prompt}")
     print(f"  工作目录      {mini_agent.WORKSPACE}")
     print()
-    result = mini_agent.run_agent(prompt, verbose=True)
+    result = mini_agent.run_agent(prompt, verbose=True, on_text=mini_agent._write_chunk)
     print()
-    print(f"  最终回复      {result}")
+    print(f"  最终回复      {_one_line(result)}（共 {len(result)} 字符）")
     return "调用模型失败" not in result
 
 

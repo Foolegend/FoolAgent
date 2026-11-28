@@ -8,6 +8,7 @@ mini_agent.py — 基于 Pi 哲学的最小 Agent Loop
     python src/mini_agent.py "你的任务"    # 单次任务：跑完就退出
 """
 
+import inspect
 import json
 import locale
 import os
@@ -23,6 +24,12 @@ try:
     from anthropic import Anthropic
 except ImportError:  # 没装 SDK 也能 import 本模块（跑测试用），真正调模型时才报错
     Anthropic = None
+
+try:
+    import skills
+except ImportError:  # 直接运行本文件时，src 不一定在 sys.path 里
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import skills
 
 
 # ─────────────────────────────────────────────
@@ -137,18 +144,30 @@ FORBIDDEN_ARGS = {
 _ENV_VAR_RE = re.compile(r"%[^%\s]+%")
 _PY_VERSION_RE = re.compile(r"^python(\d)(\.\d+)?$")
 _EXECUTABLE_SUFFIXES = (".exe", ".cmd", ".bat", ".com", ".ps1")
+# 选项值里藏着的绝对路径：C:\... 、/...
+_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|/)[^\s\"']*")
 
 
 # ─────────────────────────────────────────────
 # 模型客户端
 # ─────────────────────────────────────────────
 
+class _StreamingUnsupported(Exception):
+    """服务端不接受流式请求，退回一次性调用。"""
+
+
 class AnthropicCompatClient:
-    """标准库实现的最小 Anthropic 兼容客户端（只实现 messages.create）。
+    """标准库实现的最小 Anthropic 兼容客户端（一次性 + 流式两种调用）。
 
     官方 anthropic SDK 没装/装不上时用它，对外接口完全一致，
     走的是同一个 Anthropic Messages API。
+
+    流式：create(stream=True) 返回一个可迭代对象，产出原始 SSE 事件字典
+    （content_block_start / content_block_delta / ...），和官方 SDK 的
+    create(stream=True) 行为一致。
     """
+
+    supports_streaming = True
 
     def __init__(self, token, base_url, timeout=120):
         self.token = token
@@ -157,8 +176,18 @@ class AnthropicCompatClient:
         self.messages = self
 
     def create(self, **kwargs):
+        if kwargs.pop("stream", False):
+            return self._stream(**kwargs)
         payload = dict(kwargs)
         payload.setdefault("max_tokens", 8192)
+        with self._open(payload) as response:
+            data = json.loads(response.read().decode("utf-8", "replace"))
+        return _ApiResponse(
+            content=data.get("content") or [], stop_reason=data.get("stop_reason")
+        )
+
+    def _open(self, payload, stream=False):
+        """发起请求，返回打开的响应。失败时抛 RuntimeError。"""
         request = urllib.request.Request(
             f"{self.base_url}/v1/messages",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -167,19 +196,36 @@ class AnthropicCompatClient:
                 "x-api-key": self.token,
                 "authorization": f"Bearer {self.token}",
                 "anthropic-version": "2023-06-01",
+                # 流式响应不能被压缩：压缩会把一条 SSE 消息切成几段
+                "accept-encoding": "identity",
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8", "replace"))
+            return urllib.request.urlopen(request, timeout=self.timeout)
         except urllib.error.HTTPError as error:
             body = error.read().decode("utf-8", "replace")[:500]
+            # 400/404/422 通常是"这个端点不收 stream 参数"，退回一次性调用
+            if stream and error.code in (400, 404, 422):
+                raise _StreamingUnsupported(f"HTTP {error.code}: {body}") from error
             raise RuntimeError(f"HTTP {error.code}: {body}") from error
         except urllib.error.URLError as error:
             raise RuntimeError(f"连接 {self.base_url} 失败：{error.reason}") from error
-        return _ApiResponse(
-            content=data.get("content") or [], stop_reason=data.get("stop_reason")
-        )
+
+    def _stream(self, **kwargs):
+        """流式调用：产出原始 SSE 事件字典。"""
+        payload = dict(kwargs)
+        payload["stream"] = True
+        payload.setdefault("max_tokens", 8192)
+        response = self._open(payload, stream=True)
+        try:
+            count = 0
+            for event in _iter_sse(response):
+                count += 1
+                yield event
+            if count == 0:
+                raise _StreamingUnsupported("服务端没有返回任何流式事件")
+        finally:
+            response.close()
 
 
 class _ApiResponse:
@@ -219,6 +265,223 @@ def _build_client():
             "INVEST_ANTHROPIC_AUTH_TOKEN（或安装 anthropic SDK 并导出 ANTHROPIC_API_KEY）"
         )
     return AnthropicCompatClient(AUTH_TOKEN, BASE_URL)
+
+
+# ─────────────────────────────────────────────
+# 流式输出
+# ─────────────────────────────────────────────
+
+def _iter_sse(response):
+    """把 SSE 响应解析成事件字典。
+
+    Anthropic 的流式协议，每条消息形如：
+
+        event: content_block_delta
+        data: {"type": "content_block_delta", "index": 0, ...}
+
+    空行分隔两条消息，事件类型在 data 的 JSON 里，event: 行只是提示。
+    """
+    data_lines = []
+    for raw_line in response:
+        line = raw_line.decode("utf-8", "replace").rstrip("\r\n")
+        if not line.strip():
+            if data_lines:
+                payload = "\n".join(data_lines)
+                data_lines = []
+                if payload.strip() == "[DONE]":
+                    return
+                try:
+                    yield json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+            continue
+        if line.startswith(":"):
+            continue  # 心跳 / 注释
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+
+    # 收尾：最后一条消息后面没有空行
+    if data_lines:
+        payload = "\n".join(data_lines).strip()
+        if payload and payload != "[DONE]":
+            try:
+                yield json.loads(payload)
+            except json.JSONDecodeError:
+                pass
+
+
+class _StreamAssembler:
+    """把流式增量还原成一条完整响应。
+
+    协议：content_block_start 给出块的类型和元信息，content_block_delta
+    逐块追加内容（tool_use 的参数是分片的 JSON 字符串），content_block_stop
+    收尾，message_delta 给出 stop_reason。
+    """
+
+    def __init__(self):
+        self._blocks = {}   # index → 块字典
+        self._order = []    # 块的先后顺序
+        self._json = {}     # index → 累积的 tool_use 参数 JSON
+        self.stop_reason = None
+        self.usage = None
+
+    def feed(self, event):
+        """吃进一个原始流事件，返回 (kind, text) 增量，没有增量则返回 None。"""
+        etype = _block_field(event, "type")
+
+        if etype == "message_start":
+            message = _block_field(event, "message") or {}
+            self.stop_reason = _block_field(message, "stop_reason")
+            self.usage = _block_field(message, "usage")
+
+        elif etype == "content_block_start":
+            index = _block_field(event, "index") or 0
+            block = _block_field(event, "content_block") or {}
+            self._blocks[index] = _to_dict(block)
+            self._remember(index)
+
+        elif etype == "content_block_delta":
+            index = _block_field(event, "index") or 0
+            block = self._blocks.get(index)
+            if block is None:
+                block = {"type": "text", "text": ""}
+                self._blocks[index] = block
+                self._remember(index)
+            delta = _block_field(event, "delta") or {}
+            dtype = _block_field(delta, "type")
+
+            if dtype == "text_delta":
+                text = _block_field(delta, "text", "") or ""
+                block["text"] = (block.get("text") or "") + text
+                return ("text", text)
+            if dtype == "thinking_delta":
+                thinking = _block_field(delta, "thinking", "") or ""
+                block["thinking"] = (block.get("thinking") or "") + thinking
+                return ("thinking", thinking)
+            if dtype == "signature_delta":
+                signature = _block_field(delta, "signature", "") or ""
+                block["signature"] = (block.get("signature") or "") + signature
+            elif dtype == "input_json_delta":
+                partial = _block_field(delta, "partial_json", "") or ""
+                self._json[index] = self._json.get(index, "") + partial
+
+        elif etype == "content_block_stop":
+            self._finalize_json(_block_field(event, "index") or 0)
+
+        elif etype == "message_delta":
+            delta = _block_field(event, "delta") or {}
+            stop_reason = _block_field(delta, "stop_reason")
+            if stop_reason:
+                self.stop_reason = stop_reason
+
+        return None
+
+    def _remember(self, index):
+        if index not in self._order:
+            self._order.append(index)
+
+    def _finalize_json(self, index):
+        """把分片累积的 tool_use 参数拼成完整的 dict。"""
+        raw = self._json.pop(index, None)
+        if raw is None:
+            return
+        block = self._blocks.get(index)
+        if block is None:
+            return
+        try:
+            parsed = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            block["input"] = parsed
+
+    def response(self):
+        """拼好的完整响应。"""
+        for index in list(self._order):
+            self._finalize_json(index)  # 有些网关不发 content_block_stop
+        content = [self._blocks[index] for index in self._order if index in self._blocks]
+        return _ApiResponse(content=content, stop_reason=self.stop_reason)
+
+
+def _to_dict(value):
+    """把 SDK 的 pydantic 对象转成 dict；本来就是 dict 就复制一份。"""
+    if isinstance(value, dict):
+        return dict(value)
+    if hasattr(value, "model_dump"):
+        return value.model_dump(exclude_none=True)
+    return {}
+
+
+def _supports_streaming(client) -> bool:
+    """客户端是否支持流式调用。
+
+    官方 SDK 的 messages.create 带 stream 参数；内置兼容客户端自己打了标记；
+    只有 create() 的假 client（测试用）会被判定为不支持，自动退回一次性调用。
+    """
+    messages = getattr(client, "messages", None)
+    if messages is None:
+        return False
+    if getattr(messages, "supports_streaming", False):
+        return True
+    create = getattr(messages, "create", None)
+    if create is None:
+        return False
+    try:
+        return "stream" in inspect.signature(create).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _request_model(client, on_delta, **kwargs):
+    """调用模型，返回完整响应。
+
+    支持流式时逐段回调 on_delta(kind, text)；服务端拒绝流式时退回一次性调用，
+    此时整块文本当作一次增量吐出去，终端表现和流式一致。
+    """
+    if _supports_streaming(client):
+        try:
+            return _request_model_streaming(client, on_delta, **kwargs)
+        except _StreamingUnsupported:
+            pass  # 服务端不收 stream 参数，退回一次性
+
+    response = client.messages.create(**kwargs)
+    content = [
+        block.model_dump(exclude_none=True) if hasattr(block, "model_dump") else block
+        for block in (getattr(response, "content", None) or [])
+    ]
+    for block in content:
+        btype = _block_field(block, "type")
+        if btype == "text":
+            on_delta("text", _block_field(block, "text", "") or "")
+        elif btype == "thinking":
+            on_delta("thinking", _block_field(block, "thinking", "") or "")
+    return response
+
+
+def _request_model_streaming(client, on_delta, **kwargs):
+    """流式调用模型：边收边吐增量，最后返回拼好的响应。"""
+    assembler = _StreamAssembler()
+    stream = client.messages.create(stream=True, **kwargs)
+    count = 0
+    try:
+        for raw in stream:
+            count += 1
+            delta = assembler.feed(raw)
+            if delta:
+                kind, text = delta
+                on_delta(kind, text)
+        if count == 0:
+            raise _StreamingUnsupported("服务端没有返回任何流式事件")
+    except Exception as e:
+        status = getattr(e, "status_code", None)
+        if status in (400, 404, 422):
+            raise _StreamingUnsupported(str(e)) from e
+        raise
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+    return assembler.response()
 
 
 # ─────────────────────────────────────────────
@@ -409,8 +672,21 @@ def _normalize_command_name(token):
 
 
 def _check_path_argument(token):
-    """参数里的路径不能越出沙箱。返回错误信息，None 表示通过。"""
-    if not token or token.startswith("-"):
+    """参数里的路径不能越出沙箱。返回错误信息，None 表示通过。
+
+    选项里带的路径也要查：`--output=/tmp/x`、`--git-dir=/tmp/y` 这种
+    路径藏在等号后面，只看整个 token 是不是以 "-" 开头会漏掉。
+    """
+    if not token:
+        return None
+    if token.startswith("-"):
+        if "=" in token:
+            value = token.split("=", 1)[1]
+            # 值里可能藏着绝对路径，甚至带前缀（--pretty=format:C:\x）
+            for candidate in _ABS_PATH_RE.findall(value):
+                error = _check_path_argument(candidate)
+                if error:
+                    return error.replace(candidate, f"{token} 里的 {candidate}", 1)
         return None
     if token.startswith("~"):
         return f"错误：路径 {token} 使用了 ~ 展开，超出沙箱范围"
@@ -698,6 +974,24 @@ SYSTEM_PROMPT = f"""你叫「{AGENT_NAME}」，是一个运行在终端里的编
 回复风格：简洁。不要复述文件内容，直接说做了什么、下一步做什么。"""
 
 
+# 有副作用的工具：执行前先问过用户（read 是只读的，不用问）
+CONFIRM_TOOLS = {"write", "edit", "bash"}
+
+
+def build_system_prompt(workspace=None) -> str:
+    """system prompt = 基础原则 + （发现技能时）技能索引。
+
+    技能索引每次调用时现扫：放了新技能包不用重启就能用。
+    """
+    index = skills.index_for(workspace if workspace is not None else WORKSPACE)
+    if not index:
+        return SYSTEM_PROMPT
+    marker = "\n\n工作原则："
+    if marker in SYSTEM_PROMPT:
+        return SYSTEM_PROMPT.replace(marker, f"\n\n{index}{marker}", 1)
+    return f"{SYSTEM_PROMPT}\n\n{index}"
+
+
 # ─────────────────────────────────────────────
 # Agent Loop（核心，就这一个 while）
 # ─────────────────────────────────────────────
@@ -764,18 +1058,28 @@ def run_agent(
     verbose: bool = True,
     history=None,
     on_event=None,
+    on_text=None,
+    on_confirm=None,
 ) -> str:
     """跑完整个 agent loop，返回模型最后一段文本。
 
     client 可注入，便于测试时用假 client 跑完整流程。
     history 传入一个列表时，本轮对话会追加进该列表，下一轮继续用它，
     就得到多轮对话；不传则每次都是独立的一轮。
+    on_text 传入回调时，模型每吐出一段文字就回调一次（kind 省略，参数是文本），
+    终端用它做"边生成边显示"。
+    on_confirm 传入回调时，写文件 / 改文件 / 执行命令之前会先问一遍
+    （回调签名 on_confirm(name, args) -> bool）。返回 False 就不执行，
+    把"用户拒绝"当成工具结果回给模型，让它换个思路而不是重试。
     on_event 传入回调时，循环会把结构化进度事件交给它（供 Web 前端实时展示）：
         {"type": "step", "step": 1}
-        {"type": "thinking", "text": "..."}
-        {"type": "assistant_text", "text": "..."}
+        {"type": "text_delta", "text": "..."}     # 流式模式下逐段到达
+        {"type": "thinking_delta", "text": "..."}  # 同上
+        {"type": "thinking", "text": "..."}        # 非流式模式下的整块思考
+        {"type": "assistant_text", "text": "..."}  # 非流式模式下的过渡性文字
         {"type": "tool_call", "id": "...", "name": "read", "input": {...}}
         {"type": "tool_result", "id": "...", "name": "read", "output": "..."}
+        {"type": "tool_denied", "id": "...", "name": "bash"}   # 用户拒绝了
         {"type": "final", "text": "..."} / {"type": "error", "message": "..."}
     """
     if client is None:
@@ -793,10 +1097,26 @@ def run_agent(
         emit({"type": "error", "message": text})
         return _stop(messages, text)
 
+    # 客户端支持流式就流式：模型边生成，文字边往外送
+    streaming = _supports_streaming(client)
+    # 本步是否已经打印过文字（决定工具行要不要另起一行）
+    printed = {"text": False}
+
+    def handle_delta(kind, text):
+        """处理一段增量文本：终端直接打印，Web 端转成事件。"""
+        if not text:
+            return
+        if kind == "text" and on_text is not None:
+            on_text(text)
+            printed["text"] = True
+        if streaming:
+            emit({"type": f"{kind}_delta", "text": text})
+
     for step in range(MAX_LOOP):
         if verbose:
-            print(f"\n{'─' * 50}\n[Step {step + 1}]")
+            print(f"\n{'─' * 50}\n[Step {step + 1}] {AGENT_NAME}")
         emit({"type": "step", "step": step + 1})
+        printed["text"] = False
 
         # 上下文不做压缩：超阈值直接报错，让人手动处理
         if _estimate_chars(messages) > MAX_CONTEXT_CHARS:
@@ -807,10 +1127,12 @@ def run_agent(
 
         # 1. 调模型
         try:
-            response = client.messages.create(
+            response = _request_model(
+                client,
+                on_delta=handle_delta,
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
-                system=SYSTEM_PROMPT,
+                system=build_system_prompt(),
                 tools=TOOLS,
                 messages=list(messages),
             )
@@ -824,17 +1146,19 @@ def run_agent(
         ]
         messages.append({"role": "assistant", "content": content})
 
-        # 中间过程也给前端看一眼：思考块、以及调用工具前说的过渡性文字
-        for block in content:
-            block_type = _block_field(block, "type")
-            if block_type == "thinking":
-                text = _block_field(block, "thinking", "") or ""
-                if text:
-                    emit({"type": "thinking", "text": text[:4000]})
-            elif block_type == "text" and response.stop_reason != "end_turn":
-                text = _block_field(block, "text", "") or ""
-                if text:
-                    emit({"type": "assistant_text", "text": text})
+        # 中间过程也给前端看一眼：思考块、以及调用工具前说的过渡性文字。
+        # 流式模式下这些内容已经作为增量实时推过了，这里不重复推。
+        if not streaming:
+            for block in content:
+                block_type = _block_field(block, "type")
+                if block_type == "thinking":
+                    text = _block_field(block, "thinking", "") or ""
+                    if text:
+                        emit({"type": "thinking", "text": text[:4000]})
+                elif block_type == "text" and response.stop_reason != "end_turn":
+                    text = _block_field(block, "text", "") or ""
+                    if text:
+                        emit({"type": "assistant_text", "text": text})
 
         # 3. 如果模型不再调工具，任务结束
         if response.stop_reason == "end_turn":
@@ -861,11 +1185,29 @@ def run_agent(
                 if not isinstance(args, dict):
                     args = {}
                 if verbose:
+                    if printed["text"]:
+                        print()  # 刚打完一段话，工具行另起一行
+                        printed["text"] = False
                     print(f"  → {name}({json.dumps(args, ensure_ascii=False)[:120]})")
                 emit({"type": "tool_call", "id": block_id, "name": name, "input": args})
 
-                # 分发到实现
-                if name not in TOOL_IMPL:
+                # 有副作用的操作先问过用户；被拒绝就不执行
+                approved = True
+                if name in CONFIRM_TOOLS and on_confirm is not None:
+                    try:
+                        approved = bool(on_confirm(name, args))
+                    except Exception as e:
+                        emit({"type": "error", "message": f"确认环节出错：{e}"})
+                        approved = False
+
+                if not approved:
+                    result = (
+                        f"用户拒绝执行 {name} 操作（未经确认）。"
+                        "不要重试同一个操作；如果这一步是必需的，"
+                        "请先说明需要做什么、征得用户同意后再试。"
+                    )
+                    emit({"type": "tool_denied", "id": block_id, "name": name})
+                elif name not in TOOL_IMPL:
                     result = f"错误：未知工具 {name}"
                 else:
                     try:
@@ -907,19 +1249,90 @@ def run_agent(
 
 REPL_HELP = """命令：
   /clear   清空对话历史（上下文超限时用）
+  /yes     本会话内自动允许写文件 / 执行命令
+  /ask     恢复逐次询问（默认）
   /help    显示本帮助
   /exit    退出（也可以按 Ctrl-D）
 其他输入都会发给模型，多轮上下文自动保留。"""
+
+
+def _write_chunk(chunk):
+    """把增量文本直接写到终端（流式输出：模型吐一个字就显示一个字）。
+
+    模型可能吐出 emoji 之类 GBK 编不了的字符，编不了就替换掉，
+    不能因为一个字符把整轮对话带崩。
+    """
+    try:
+        sys.stdout.write(chunk)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        sys.stdout.write(chunk.encode(encoding, "replace").decode(encoding, "replace"))
+    sys.stdout.flush()
+
+
+def _describe_tool(name, args) -> str:
+    """把一次工具调用说成人话，用在确认提示里。"""
+    args = args if isinstance(args, dict) else {}
+    if name == "bash":
+        return f"执行命令：{args.get('command', '')}"
+    if name == "write":
+        return f"写入文件：{args.get('path', '')}"
+    if name == "edit":
+        return f"修改文件：{args.get('path', '')}"
+    return name
+
+
+def _stdin_is_interactive() -> bool:
+    """stdin 是不是真人终端。非交互时不能靠它来问用户。"""
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _make_confirmer(auto_yes: bool = False):
+    """做一个确认回调：写文件 / 改文件 / 执行命令之前先问用户。
+
+    回调里读的是同一个 stdin，所以只能在交互式终端里用；
+    非交互（管道、脚本）时自动放行，并打印一次说明。
+    """
+    state = {"auto": auto_yes, "warned": False}
+
+    def confirm(name, args) -> bool:
+        if state["auto"]:
+            return True
+        if not _stdin_is_interactive():
+            if not state["warned"]:
+                print(
+                    "\n（非交互终端，无法逐次确认：本次自动允许写文件 / 执行命令）"
+                )
+                state["warned"] = True
+            return True
+        print(f"\n※ 需要确认：{_describe_tool(name, args)}")
+        try:
+            answer = input("  允许执行吗？[y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        if answer in ("y", "yes"):
+            return True
+        print("  已拒绝。")
+        return False
+
+    confirm.state = state
+    return confirm
 
 
 def interactive(client=None, verbose: bool = True) -> None:
     """多轮对话：一直问，一直答，直到 /exit 或 Ctrl-D。
 
     history 在循环外创建、每轮传进去，所以模型始终能看到之前的对话。
+    回复是流式打印的：模型生成一句，终端就显示一句。
     """
     if client is None:
         client = _build_client()
     history = []
+    confirmer = _make_confirmer()
     print("\n交互模式已启动，直接输入问题回车发送。输入 /help 查看命令。")
 
     while True:
@@ -945,16 +1358,31 @@ def interactive(client=None, verbose: bool = True) -> None:
         if command == "/help":
             print(REPL_HELP)
             continue
+        if command == "/yes":
+            confirmer.state["auto"] = True
+            print("已切换：后续写文件 / 执行命令自动允许（/ask 切回逐次询问）。")
+            continue
+        if command == "/ask":
+            confirmer.state["auto"] = False
+            print("已切换：每次写文件 / 执行命令前都会问一遍。")
+            continue
 
         # Ctrl-C 打断本轮：把历史回滚到本轮开始前，避免留下半截对话
         snapshot = len(history)
         try:
-            reply = run_agent(text, client=client, verbose=verbose, history=history)
+            run_agent(
+                text,
+                client=client,
+                verbose=verbose,
+                history=history,
+                on_text=_write_chunk,
+                on_confirm=confirmer,
+            )
         except KeyboardInterrupt:
             del history[snapshot:]
             print("\n本轮已取消。")
             continue
-        print(f"\n{AGENT_NAME} > {reply}")
+        print()
 
 
 # ─────────────────────────────────────────────
@@ -981,8 +1409,13 @@ if __name__ == "__main__":
     try:
         client = _build_client()
         if prompt:
-            final = run_agent(prompt, client=client)
-            print(f"\n{'═' * 50}\n{final}")
+            run_agent(
+                prompt,
+                client=client,
+                on_text=_write_chunk,
+                on_confirm=_make_confirmer(),
+            )
+            print()
         else:
             interactive(client=client)
     except RuntimeError as e:

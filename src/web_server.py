@@ -11,6 +11,7 @@
     GET  /               前端页面（web/index.html）
     GET  /api/info       模型、工作目录等配置信息
     POST /api/chat       提问；用 SSE 逐步推送 agent 的每个处理步骤
+    POST /api/confirm    回答"要不要执行这次操作"的询问
     POST /api/reset      清空某个会话的上下文
 
 安全提示：这个服务把拥有文件读写 / 命令执行能力的 agent 暴露成了 HTTP 接口，
@@ -23,6 +24,7 @@ import argparse
 import json
 import sys
 import threading
+import time
 import uuid
 import webbrowser
 from collections import OrderedDict
@@ -43,6 +45,8 @@ WEB_ROOT = ROOT / "web"
 
 MAX_BODY = 1_000_000        # 单次请求体上限，防止被塞爆内存
 MAX_SESSIONS = 200          # 内存里最多保留多少个会话
+CONFIRM_TIMEOUT = 180       # 等用户点确认的最长秒数
+CONFIRM_PING = 15           # 等待期间每多少秒探一次连接还在不在
 SSE_HEADERS = {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -102,6 +106,81 @@ def reset_session(session_id: str) -> None:
 
 class ClientDisconnected(Exception):
     """浏览器中途断开（关页面 / 点停止 / 网络断）。"""
+
+
+# ── 操作确认 ────────────────────────────────────────────────
+# agent 要写文件 / 改文件 / 执行命令时，先在这里挂一个请求，
+# 把询问推给浏览器，等用户点"允许"或"拒绝"再继续。
+
+_pending_confirms: "OrderedDict[str, dict]" = OrderedDict()
+_confirm_lock = threading.Lock()
+
+
+def _register_confirm(request_id: str) -> dict:
+    entry = {"event": threading.Event(), "approved": False}
+    with _confirm_lock:
+        _pending_confirms[request_id] = entry
+    return entry
+
+
+def resolve_confirm(request_id: str, approved: bool) -> bool:
+    """回答一次询问。找不到对应请求（已超时 / 已取消）返回 False。"""
+    with _confirm_lock:
+        entry = _pending_confirms.get(request_id)
+    if entry is None:
+        return False
+    entry["approved"] = bool(approved)
+    entry["event"].set()
+    return True
+
+
+def _drop_confirm(request_id: str) -> None:
+    with _confirm_lock:
+        _pending_confirms.pop(request_id, None)
+
+
+def make_confirm_callback(emit, timeout: int = CONFIRM_TIMEOUT):
+    """做一个确认回调：把询问推给前端，等用户点允许 / 拒绝。
+
+    返回 False 表示拒绝（或超时），agent 不会执行这次操作。
+    """
+
+    def confirm(name, args) -> bool:
+        request_id = uuid.uuid4().hex
+        entry = _register_confirm(request_id)
+        try:
+            emit({
+                "type": "confirm",
+                "id": request_id,
+                "name": name,
+                "input": args,
+            })
+            deadline = time.monotonic() + timeout
+            while True:
+                # 分段等：期间探一下连接还在不在，浏览器关了要能立刻发现
+                if entry["event"].wait(CONFIRM_PING):
+                    break
+                if time.monotonic() >= deadline:
+                    emit({
+                        "type": "confirm_result",
+                        "id": request_id,
+                        "approved": False,
+                        "reason": "等待确认超时",
+                    })
+                    return False
+                emit({"type": "confirm_ping", "id": request_id})
+
+            approved = bool(entry["approved"])
+            emit({
+                "type": "confirm_result",
+                "id": request_id,
+                "approved": approved,
+            })
+            return approved
+        finally:
+            _drop_confirm(request_id)
+
+    return confirm
 
 
 # ─────────────────────────────────────────────
@@ -193,12 +272,26 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/api/chat":
             self.handle_chat()
+        elif path == "/api/confirm":
+            self.handle_confirm()
         elif path == "/api/reset":
             self.handle_reset()
         else:
             self.send_json(404, {"error": "未找到"})
 
     # ── 接口实现 ──────────────────────────────
+
+    def handle_confirm(self) -> None:
+        """回答一次"要不要执行"的询问。"""
+        try:
+            payload = self._json_body()
+        except ValueError as exc:
+            self.send_json(400, {"error": str(exc)})
+            return
+        request_id = str(payload.get("request_id") or "").strip()[:128]
+        approved = bool(payload.get("approved"))
+        found = resolve_confirm(request_id, approved)
+        self.send_json(200, {"ok": found})
 
     def handle_reset(self) -> None:
         try:
@@ -245,6 +338,11 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, OSError) as exc:
                 raise ClientDisconnected() from exc
 
+        # 需要确认时：把询问推给前端，等用户点允许 / 拒绝
+        confirm = None
+        if getattr(self.server, "require_confirm", True):
+            confirm = make_confirm_callback(emit)
+
         # 同一会话串行执行；快照用于浏览器断开时回滚半截对话
         with session.lock:
             snapshot = len(session.history)
@@ -256,6 +354,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                     verbose=False,
                     history=session.history,
                     on_event=emit,
+                    on_confirm=confirm,
                 )
             except ClientDisconnected:
                 # 跑到一半断开：本轮历史不完整，回滚，别污染下一轮
@@ -283,13 +382,19 @@ class AgentHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, client=None):
+    def __init__(self, address, client=None, require_confirm: bool = True):
         self.agent_client = client
+        self.require_confirm = require_confirm
         super().__init__(address, AgentRequestHandler)
 
 
-def create_server(host: str = "127.0.0.1", port: int = 8765, client=None) -> AgentHTTPServer:
-    return AgentHTTPServer((host, port), client=client)
+def create_server(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    client=None,
+    require_confirm: bool = True,
+) -> AgentHTTPServer:
+    return AgentHTTPServer((host, port), client=client, require_confirm=require_confirm)
 
 
 # ─────────────────────────────────────────────
@@ -304,6 +409,11 @@ def main(argv=None) -> int:
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")
     parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
+    parser.add_argument(
+        "--no-confirm",
+        action="store_true",
+        help="不询问就执行写文件 / 命令（默认每次都问）",
+    )
     args = parser.parse_args(argv)
 
     for stream in (sys.stdout, sys.stderr):
@@ -322,7 +432,10 @@ def main(argv=None) -> int:
         print("       页面仍会启动，但提问会返回错误；请检查 .env 配置。")
 
     try:
-        server = create_server(args.host, args.port, client=client)
+        server = create_server(
+            args.host, args.port, client=client,
+            require_confirm=not args.no_confirm,
+        )
     except OSError as exc:
         print(f"[ERROR] 无法监听 {args.host}:{args.port}：{exc}")
         return 1
@@ -335,6 +448,7 @@ def main(argv=None) -> int:
     print(f"│ 地址   {url}")
     print(f"│ 模型   {mini_agent.MODEL}" + (f" @ {mini_agent.BASE_URL}" if mini_agent.BASE_URL else ""))
     print(f"│ 工作目录 {mini_agent.WORKSPACE}")
+    print(f"│ 确认   {'每次写文件/执行命令都要你点允许' if not args.no_confirm else '已关闭（--no-confirm）'}")
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print("│ [WARN] 当前监听地址不是本机回环，局域网内任何人都能操作这个 agent！")
     print("│ Ctrl-C 停止")

@@ -203,6 +203,27 @@ class BashToolTest(SandboxTestCase):
         result = mini_agent.tool_bash("cat %USERPROFILE%/secret.txt")
         self.assertIn("环境变量展开", result)
 
+    def test_bash_rejects_path_hidden_in_option_value(self) -> None:
+        """路径藏在等号后面也要拦：--output=/tmp/x、--git-dir=/tmp/y。"""
+        outside = str(Path(tempfile.gettempdir()) / "evil.txt")
+        for command in (
+            f"git log --output={outside} -1",
+            f"git --git-dir={outside} status",
+            f"git log --pretty=format:{outside} -1",
+        ):
+            result = mini_agent.tool_bash(command)
+            self.assertIn("路径越界", result, command)
+
+    def test_bash_allows_ordinary_option_values(self) -> None:
+        """别把正常选项值误判成路径。"""
+        for command in (
+            "git log --pretty=format:%h -1",
+            "ls --color=always .",
+            "git log --max-count=1",
+        ):
+            result = mini_agent.tool_bash(command)
+            self.assertNotIn("路径越界", result, command)
+
     def test_bash_allows_relative_path_inside_sandbox(self) -> None:
         (self.root / "ok.txt").write_text("fine", encoding="utf-8")
         result = mini_agent.tool_bash("cat ok.txt")
